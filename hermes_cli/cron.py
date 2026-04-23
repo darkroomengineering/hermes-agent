@@ -168,6 +168,8 @@ def cron_create(args):
         skill=getattr(args, "skill", None),
         skills=_normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None)),
         script=getattr(args, "script", None),
+        enabled_toolsets=getattr(args, "enabled_toolsets", None),
+        disabled_toolsets=getattr(args, "disabled_toolsets", None),
     )
     if not result.get("success"):
         print(color(f"Failed to create job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -180,6 +182,10 @@ def cron_create(args):
     job_data = result.get("job", {})
     if job_data.get("script"):
         print(f"  Script: {job_data['script']}")
+    if job_data.get("enabled_toolsets"):
+        print(f"  Enabled toolsets: {', '.join(job_data['enabled_toolsets'])}")
+    if job_data.get("disabled_toolsets"):
+        print(f"  Extra disabled toolsets: {', '.join(job_data['disabled_toolsets'])}")
     print(f"  Next run: {result['next_run_at']}")
     return 0
 

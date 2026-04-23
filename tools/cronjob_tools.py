@@ -234,6 +234,8 @@ def cronjob(
     base_url: Optional[str] = None,
     reason: Optional[str] = None,
     script: Optional[str] = None,
+    enabled_toolsets: Optional[List[str]] = None,
+    disabled_toolsets: Optional[List[str]] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -271,6 +273,8 @@ def cronjob(
                 provider=_normalize_optional_job_value(provider),
                 base_url=_normalize_optional_job_value(base_url, strip_trailing_slash=True),
                 script=_normalize_optional_job_value(script),
+                enabled_toolsets=enabled_toolsets,
+                disabled_toolsets=disabled_toolsets,
             )
             return json.dumps(
                 {

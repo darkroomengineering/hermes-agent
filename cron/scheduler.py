@@ -733,6 +733,17 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             except Exception as e:
                 logger.debug("Job '%s': failed to load credential pool for %s: %s", job_id, runtime_provider, e)
 
+        # Darkroom fork: per-job toolset scoping — merge job-level restrictions
+        # with scheduler-mandatory disabled toolsets. Validated 2026-04-22.
+        # See plans/hermes-migration-analysis.md (darkroomengineering/darky) §8.
+        _scheduler_disabled = ["cronjob", "messaging", "clarify"]
+        _job_disabled = list(job.get("disabled_toolsets") or []) + _scheduler_disabled
+        _job_enabled = list(job.get("enabled_toolsets") or []) or None
+        if _job_enabled:
+            logger.info("Job '%s': enabled_toolsets=%s", job_id, sorted(_job_enabled))
+        if job.get("disabled_toolsets"):
+            logger.info("Job '%s': extra disabled_toolsets=%s", job_id, sorted(job.get("disabled_toolsets") or []))
+
         agent = AIAgent(
             model=turn_route["model"],
             api_key=turn_route["runtime"].get("api_key"),
@@ -750,7 +761,8 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             providers_ignored=pr.get("ignore"),
             providers_order=pr.get("order"),
             provider_sort=pr.get("sort"),
-            disabled_toolsets=["cronjob", "messaging", "clarify"],
+            enabled_toolsets=_job_enabled,
+            disabled_toolsets=sorted(set(_job_disabled)),
             quiet_mode=True,
             skip_context_files=True,  # Don't inject SOUL.md/AGENTS.md from scheduler cwd
             skip_memory=True,  # Cron system prompts would corrupt user representations

@@ -5229,6 +5229,8 @@ For more help on a command:
     cron_create.add_argument("--repeat", type=int, help="Optional repeat count")
     cron_create.add_argument("--skill", dest="skills", action="append", help="Attach a skill. Repeat to add multiple skills.")
     cron_create.add_argument("--script", help="Path to a Python script whose stdout is injected into the prompt each run")
+    cron_create.add_argument("--enabled-toolsets", dest="enabled_toolsets", nargs="+", help="Darkroom fork: restrict the cron agent to ONLY these toolsets (e.g. --enabled-toolsets darky finance)")
+    cron_create.add_argument("--disabled-toolsets", dest="disabled_toolsets", nargs="+", help="Darkroom fork: extra disabled toolsets (merged with scheduler-mandatory: cronjob, messaging, clarify)")
 
     # cron edit
     cron_edit = cron_subparsers.add_parser("edit", help="Edit an existing scheduled job")

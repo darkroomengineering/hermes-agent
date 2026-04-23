@@ -378,6 +378,8 @@ def create_job(
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
     script: Optional[str] = None,
+    enabled_toolsets: Optional[List[str]] = None,
+    disabled_toolsets: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -397,6 +399,12 @@ def create_job(
         script: Optional path to a Python script whose stdout is injected into the
                 prompt each run.  The script runs before the agent turn, and its output
                 is prepended as context.  Useful for data collection / change detection.
+        enabled_toolsets: Optional per-job allowlist of toolsets the agent can use.
+                When set, the cron agent is constructed with enabled_toolsets=[...],
+                restricting it to ONLY the listed toolsets plus scheduler-mandatory
+                disabled toolsets.  Darkroom fork addition for per-cron tool isolation.
+        disabled_toolsets: Optional per-job extra disabled toolsets (merged with
+                scheduler-mandatory disabled list: cronjob, messaging, clarify).
 
     Returns:
         The created job dict
@@ -428,6 +436,17 @@ def create_job(
     normalized_script = str(script).strip() if isinstance(script, str) else None
     normalized_script = normalized_script or None
 
+    # Normalize toolset restrictions (darkroom fork: per-job tool scoping)
+    def _norm_ts(v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v = [v]
+        return [str(x).strip() for x in v if str(x).strip()]
+
+    normalized_enabled_toolsets = _norm_ts(enabled_toolsets)
+    normalized_disabled_toolsets = _norm_ts(disabled_toolsets)
+
     label_source = (prompt or (normalized_skills[0] if normalized_skills else None)) or "cron job"
     job = {
         "id": job_id,
@@ -439,6 +458,8 @@ def create_job(
         "provider": normalized_provider,
         "base_url": normalized_base_url,
         "script": normalized_script,
+        "enabled_toolsets": normalized_enabled_toolsets,
+        "disabled_toolsets": normalized_disabled_toolsets,
         "schedule": parsed_schedule,
         "schedule_display": parsed_schedule.get("display", schedule),
         "repeat": {
