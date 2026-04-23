@@ -184,11 +184,11 @@ DEFAULT_CONTEXT_LENGTHS = {
     "moonshotai/Kimi-K2-Thinking": 262144,
     "MiniMaxAI/MiniMax-M2.5": 204800,
     "XiaomiMiMo/MiMo-V2-Flash": 256000,
-    "mimo-v2-pro": 1000000,
-    "mimo-v2-omni": 256000,
-    "mimo-v2-flash": 256000,
-    "mimo-v2.5-pro": 1000000,
-    "mimo-v2.5": 1000000,
+    "mimo-v2-pro": 1048576,
+    "mimo-v2.5-pro": 1048576,
+    "mimo-v2.5": 1048576,
+    "mimo-v2-omni": 262144,
+    "mimo-v2-flash": 262144,
     "zai-org/GLM-5": 202752,
 }
 
