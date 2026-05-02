@@ -21,12 +21,14 @@ try:
     from slack_bolt.async_app import AsyncApp
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
     from slack_sdk.web.async_client import AsyncWebClient
+    from slack_sdk.errors import SlackApiError
     SLACK_AVAILABLE = True
 except ImportError:
     SLACK_AVAILABLE = False
     AsyncApp = Any
     AsyncSocketModeHandler = Any
     AsyncWebClient = Any
+    SlackApiError = Exception  # fallback for type-check fallthrough
 
 import sys
 from pathlib import Path as _Path
@@ -254,11 +256,38 @@ class SlackAdapter(BasePlatformAdapter):
         logger.info("[Slack] Disconnected")
 
     def _get_client(self, chat_id: str) -> AsyncWebClient:
-        """Return the workspace-specific WebClient for a channel."""
+        """Return a FRESH workspace-specific WebClient for a channel.
+
+        Per slack-bolt-python#1332 (maintainer recommendation in #1084):
+            The only safe way to call the client from outside a bolt
+            handler is to create a new client each time (as the handlers do).
+
+        The bolt App's primary client (`self._app.client`) and any cached
+        per-team clients (`self._team_clients[team_id]`) accumulate stale
+        connection state when used outside Bolt's handler dispatch flow.
+        Cron-driven sends, scheduled-report deliveries, and any other
+        non-handler call path will eventually start returning
+        `channel_not_found` for valid channels until the process restarts.
+
+        Construct a fresh AsyncWebClient on every call. We re-use the
+        TOKEN from cached `_team_clients[team_id]` so multi-workspace
+        OAuth installations stay correctly attributed; we do NOT re-use
+        the cached client *object*.
+
+        Tradeoff: each call allocates a new aiohttp ClientSession.
+        Negligible overhead at our scale (a few sends per minute peak).
+        Python GC + aiohttp's session-close-on-finalize handles cleanup.
+
+        Refs:
+        - https://github.com/slackapi/bolt-python/issues/1332
+        - https://github.com/slackapi/bolt-python/issues/1084#issuecomment-2125944725
+        """
         team_id = self._channel_team.get(chat_id)
         if team_id and team_id in self._team_clients:
-            return self._team_clients[team_id]
-        return self._app.client  # fallback to primary
+            token = self._team_clients[team_id].token
+        else:
+            token = self.config.token  # primary bot token from config
+        return AsyncWebClient(token=token)
 
     async def send(
         self,
@@ -297,7 +326,26 @@ class SlackAdapter(BasePlatformAdapter):
                     if broadcast and i == 0:
                         kwargs["reply_broadcast"] = True
 
-                last_result = await self._get_client(chat_id).chat_postMessage(**kwargs)
+                # Layer 2 defense (paired with _get_client's fresh-per-call):
+                # if a stale `_team_clients[team_id]` token still slips through
+                # and Slack returns channel_not_found for a valid channel,
+                # invalidate the cache entry and retry once with a strictly
+                # primary-token client. See darkroom hermes #54.
+                try:
+                    last_result = await self._get_client(chat_id).chat_postMessage(**kwargs)
+                except SlackApiError as e:
+                    if e.response.get("error") == "channel_not_found":
+                        logger.warning(
+                            "[Slack] channel_not_found for %s — invalidating "
+                            "team-client cache and retrying with primary token",
+                            chat_id,
+                        )
+                        self._channel_team.pop(chat_id, None)
+                        last_result = await AsyncWebClient(
+                            token=self.config.token
+                        ).chat_postMessage(**kwargs)
+                    else:
+                        raise
 
             # Track the sent message ts so we can auto-respond to thread
             # replies without requiring @mention.
