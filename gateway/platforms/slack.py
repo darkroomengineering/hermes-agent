@@ -244,6 +244,29 @@ class SlackAdapter(BasePlatformAdapter):
 
         logger.info("[Slack] Disconnected")
 
+    @staticmethod
+    def _split_chat_id(chat_id: str) -> Tuple[str, Optional[str]]:
+        """Split a `channel:thread_ts` joined chat_id into (channel, thread_ts).
+
+        Hermes' session bookkeeping keys threaded chats with a
+        `f"{chat_id}:{thread_id}"` format (gateway/channel_directory.py::
+        _session_entry_id). The channel-directory builder echoes that joined
+        format as the entry's `id`, so when `cron.scheduler._resolve_delivery_target`
+        runs `resolve_channel_name("slack", "C…")` and prefix-matches the
+        only directory entry for that channel, it returns the joined string.
+        That string then flows here as `chat_id` and is passed verbatim to
+        chat.postMessage as `channel=`, which Slack rejects with
+        `channel_not_found`.
+
+        Defensive split: if `chat_id` contains `:`, peel off the suffix as a
+        thread_ts. Caller is responsible for honoring the returned thread_ts
+        when it didn't already have an explicit one.
+        """
+        if ":" in chat_id:
+            channel, _, ts = chat_id.partition(":")
+            return channel, (ts or None)
+        return chat_id, None
+
     def _get_client(self, chat_id: str) -> AsyncWebClient:
         """Return a FRESH workspace-specific WebClient for a channel.
 
@@ -271,7 +294,8 @@ class SlackAdapter(BasePlatformAdapter):
         - https://github.com/slackapi/bolt-python/issues/1332
         - https://github.com/slackapi/bolt-python/issues/1084#issuecomment-2125944725
         """
-        team_id = self._channel_team.get(chat_id)
+        channel, _ = self._split_chat_id(chat_id)
+        team_id = self._channel_team.get(channel) or self._channel_team.get(chat_id)
         if team_id and team_id in self._team_clients:
             token = self._team_clients[team_id].token
         else:
@@ -296,7 +320,12 @@ class SlackAdapter(BasePlatformAdapter):
             # Split long messages, preserving code block boundaries
             chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
 
-            thread_ts = self._resolve_thread_ts(reply_to, metadata)
+            # Defensive split: callers occasionally hand us a Hermes-internal
+            # `channel:thread_ts` joined chat_id (see _split_chat_id docstring).
+            # Peel the suffix off and treat it as a thread_ts fallback so we
+            # never pass the joined string as `channel=` to chat.postMessage.
+            channel, embedded_ts = self._split_chat_id(chat_id)
+            thread_ts = self._resolve_thread_ts(reply_to, metadata) or embedded_ts
             last_result = None
 
             # reply_broadcast: also post thread replies to the main channel.
@@ -305,7 +334,7 @@ class SlackAdapter(BasePlatformAdapter):
 
             for i, chunk in enumerate(chunks):
                 kwargs = {
-                    "channel": chat_id,
+                    "channel": channel,
                     "text": chunk,
                     "mrkdwn": True,
                 }
@@ -321,14 +350,15 @@ class SlackAdapter(BasePlatformAdapter):
                 # invalidate the cache entry and retry once with a strictly
                 # primary-token client. See darkroom hermes #54.
                 try:
-                    last_result = await self._get_client(chat_id).chat_postMessage(**kwargs)
+                    last_result = await self._get_client(channel).chat_postMessage(**kwargs)
                 except SlackApiError as e:
                     if e.response.get("error") == "channel_not_found":
                         logger.warning(
                             "[Slack] channel_not_found for %s — invalidating "
                             "team-client cache and retrying with primary token",
-                            chat_id,
+                            channel,
                         )
+                        self._channel_team.pop(channel, None)
                         self._channel_team.pop(chat_id, None)
                         last_result = await AsyncWebClient(
                             token=self.config.token
@@ -370,8 +400,9 @@ class SlackAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         try:
             formatted = self.format_message(content)
-            await self._get_client(chat_id).chat_update(
-                channel=chat_id,
+            channel, _ = self._split_chat_id(chat_id)
+            await self._get_client(channel).chat_update(
+                channel=channel,
                 ts=message_id,
                 text=formatted,
             )
@@ -396,16 +427,18 @@ class SlackAdapter(BasePlatformAdapter):
         if not self._app:
             return
 
+        channel, embedded_ts = self._split_chat_id(chat_id)
         thread_ts = None
         if metadata:
             thread_ts = metadata.get("thread_id") or metadata.get("thread_ts")
+        thread_ts = thread_ts or embedded_ts
 
         if not thread_ts:
             return  # Can only set status in a thread context
 
         try:
-            await self._get_client(chat_id).assistant_threads_setStatus(
-                channel_id=chat_id,
+            await self._get_client(channel).assistant_threads_setStatus(
+                channel_id=channel,
                 thread_ts=thread_ts,
                 status="is thinking...",
             )
@@ -471,12 +504,14 @@ class SlackAdapter(BasePlatformAdapter):
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        result = await self._get_client(chat_id).files_upload_v2(
-            channel=chat_id,
+        channel, embedded_ts = self._split_chat_id(chat_id)
+        thread_ts = self._resolve_thread_ts(reply_to, metadata) or embedded_ts
+        result = await self._get_client(channel).files_upload_v2(
+            channel=channel,
             file=file_path,
             filename=os.path.basename(file_path),
             initial_comment=caption or "",
-            thread_ts=self._resolve_thread_ts(reply_to, metadata),
+            thread_ts=thread_ts,
         )
         return SendResult(success=True, raw_response=result)
 
