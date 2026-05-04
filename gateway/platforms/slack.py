@@ -256,8 +256,8 @@ class SlackAdapter(BasePlatformAdapter):
         logger.info("[Slack] Disconnected")
 
     @staticmethod
-    def _split_chat_id(chat_id: str) -> Tuple[str, Optional[str]]:
-        """Split a `channel:thread_ts` joined chat_id into (channel, thread_ts).
+    def _split_chat_id(chat_id: str) -> str:
+        """Strip a `:thread_ts` suffix from a Hermes-internal chat_id.
 
         Hermes' session bookkeeping keys threaded chats with a
         `f"{chat_id}:{thread_id}"` format (gateway/channel_directory.py::
@@ -269,14 +269,17 @@ class SlackAdapter(BasePlatformAdapter):
         chat.postMessage as `channel=`, which Slack rejects with
         `channel_not_found`.
 
-        Defensive split: if `chat_id` contains `:`, peel off the suffix as a
-        thread_ts. Caller is responsible for honoring the returned thread_ts
-        when it didn't already have an explicit one.
+        We DROP the suffix entirely — it's a session-key artifact, not user
+        thread intent. Real thread routing happens via `metadata["thread_id"]`,
+        not via the chat_id format. Returning the embedded suffix as a thread
+        fallback caused cron deliveries to land inside long-buried threads
+        instead of the channel root (observed: daily-pto-reminder posted into
+        a 5-day-old session thread instead of the visible channel feed).
         """
         if ":" in chat_id:
-            channel, _, ts = chat_id.partition(":")
-            return channel, (ts or None)
-        return chat_id, None
+            channel, _, _ = chat_id.partition(":")
+            return channel
+        return chat_id
 
     def _get_client(self, chat_id: str) -> AsyncWebClient:
         """Return a FRESH workspace-specific WebClient for a channel.
@@ -305,7 +308,7 @@ class SlackAdapter(BasePlatformAdapter):
         - https://github.com/slackapi/bolt-python/issues/1332
         - https://github.com/slackapi/bolt-python/issues/1084#issuecomment-2125944725
         """
-        channel, _ = self._split_chat_id(chat_id)
+        channel = self._split_chat_id(chat_id)
         team_id = self._channel_team.get(channel) or self._channel_team.get(chat_id)
         if team_id and team_id in self._team_clients:
             token = self._team_clients[team_id].token
@@ -331,12 +334,13 @@ class SlackAdapter(BasePlatformAdapter):
             # Split long messages, preserving code block boundaries
             chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
 
-            # Defensive split: callers occasionally hand us a Hermes-internal
-            # `channel:thread_ts` joined chat_id (see _split_chat_id docstring).
-            # Peel the suffix off and treat it as a thread_ts fallback so we
-            # never pass the joined string as `channel=` to chat.postMessage.
-            channel, embedded_ts = self._split_chat_id(chat_id)
-            thread_ts = self._resolve_thread_ts(reply_to, metadata) or embedded_ts
+            # Defensive: strip any `:thread_ts` suffix from chat_id so we
+            # never pass the joined session-key form as `channel=` to
+            # chat.postMessage. Real thread routing flows via metadata —
+            # honoring the embedded suffix would land cron deliveries inside
+            # long-buried session threads instead of the channel root.
+            channel = self._split_chat_id(chat_id)
+            thread_ts = self._resolve_thread_ts(reply_to, metadata)
             last_result = None
 
             # reply_broadcast: also post thread replies to the main channel.
@@ -413,7 +417,7 @@ class SlackAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         try:
             formatted = self.format_message(content)
-            channel, _ = self._split_chat_id(chat_id)
+            channel = self._split_chat_id(chat_id)
             await self._get_client(channel).chat_update(
                 channel=channel,
                 ts=message_id,
@@ -440,11 +444,10 @@ class SlackAdapter(BasePlatformAdapter):
         if not self._app:
             return
 
-        channel, embedded_ts = self._split_chat_id(chat_id)
+        channel = self._split_chat_id(chat_id)
         thread_ts = None
         if metadata:
             thread_ts = metadata.get("thread_id") or metadata.get("thread_ts")
-        thread_ts = thread_ts or embedded_ts
 
         if not thread_ts:
             return  # Can only set status in a thread context
@@ -534,8 +537,8 @@ class SlackAdapter(BasePlatformAdapter):
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        channel, embedded_ts = self._split_chat_id(chat_id)
-        thread_ts = self._resolve_thread_ts(reply_to, metadata) or embedded_ts
+        channel = self._split_chat_id(chat_id)
+        thread_ts = self._resolve_thread_ts(reply_to, metadata)
         result = await self._get_client(channel).files_upload_v2(
             channel=channel,
             file=file_path,
